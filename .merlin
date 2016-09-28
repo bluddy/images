@@ -1,3 +1,4 @@
 PKG core
 PKG imagelib
+FLG -w -57
 
