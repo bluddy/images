@@ -21,8 +21,8 @@ module ImgUtils = struct
 
   let map ~f img =
     let arr = unwrap_img img in
-    for i=0 to Array2.dim1 arr - 1 do
-      for j=0 to Array2.dim2 arr - 1 do
+    for j=0 to Array2.dim2 arr - 1 do
+      for i=0 to Array2.dim1 arr - 1 do
         let x = Array2.unsafe_get arr i j in
         Array2.unsafe_set arr i j (f x)
       done
@@ -32,13 +32,30 @@ module ImgUtils = struct
   let fold ~f ~init img =
     let arr = unwrap_img img in
     let acc = ref init in
-    for i=0 to Array2.dim1 arr - 1 do
-      for j=0 to Array2.dim2 arr - 1 do
+    for j=0 to Array2.dim2 arr - 1 do
+      for i=0 to Array2.dim1 arr - 1 do
         let x = Array2.unsafe_get arr i j in
         acc := f x !acc
       done
     done;
     !acc
+
+end
+
+module EquivTbl = struct
+  let create () = Int.Table.create ()
+
+  let add tbl x y =
+    let y_cl = Option.value (Int.Table.find tbl y) ~default:Int.Set.empty in
+    let x_cl = Option.value (Int.Table.find tbl x) ~default:Int.Set.empty in
+    let equiv_cl = Int.Set.add (Int.Set.add (Int.Set.union x_cl y_cl) x) y in
+    Int.Set.iter equiv_cl ~f:(fun x -> Int.Table.set tbl ~key:x ~data:equiv_cl)
+
+  let eq tbl x y =
+    Option.value_map (Int.Table.find tbl x) ~default:false ~f:(fun set -> Int.Set.mem set y)
+
+  let min_elt tbl x =
+    Option.value_map (Int.Table.find tbl x) ~default:None ~f:(fun set -> Int.Set.min_elt set)
 
 end
 
@@ -50,18 +67,18 @@ let bin_image threshold img =
     img: a binary image *)
 let seq_label img =
   let run () =
-    let equi_tbl = Int.Table.create () in
+    let eq_tbl = EquivTbl.create () in
     let label = ref 0 in
     let new_label () = incr label; !label in
     let open Bigarray in
     let arr = ImgUtils.unwrap_img img in
-    for i=0 to Array2.dim1 arr - 1 do
-      for j=0 to Array2.dim2 arr - 1 do
+    for j=0 to Array2.dim2 arr - 1 do (* y *)
+      for i=0 to Array2.dim1 arr - 1 do (* x *)
         let top, left, tl = match i, j with
           | 0, 0 -> 0, 0, 0
-          | 0, _ -> 0, arr.{i, j-1}, 0
-          | _, 0 -> arr.{i-1, j}, 0, 0
-          | _ -> arr.{i-1, j}, arr.{i, j-1}, arr.{i-1, j-1}
+          | 0, _ -> arr.{i, j-1}, 0, 0
+          | _, 0 -> 0, arr.{i-1, j}, 0
+          | _ -> arr.{i, j-1}, arr.{i-1, j}, arr.{i-1, j-1}
         in
         match tl, top, left, arr.{i, j} with
         | _, _,
@@ -83,28 +100,30 @@ let seq_label img =
           c, 255 when b = c -> arr.{i, j} <- b
 
         | 0, b,
-          c, 255 -> let x, y = if b < c then b, c else c, b in
-                    Int.Table.change equi_tbl x
-                      ~f:(function None -> some @@ Int.Set.singleton y
-                                 | Some set -> some @@ Int.Set.add set y)
-                      (* Use equivalence table *)
+          c, 255 -> EquivTbl.add eq_tbl b c;
+                    arr.{i, j} <- b
 
         | _ -> invalid_arg "Non-binary image"
       done
     done;
+    Printf.printf "Max label: %d\n" !label;
     (* minimize number of labels *)
-    ignore @@
-      ImgUtils.map ~f:(fun lbl ->
-        match Int.Table.find equi_tbl lbl with
-        | None -> lbl
-        | Some s -> Int.Set.min_elt s |> Option.value_exn)
-        img
+    ignore @@ ImgUtils.map ~f:(function 0 -> 0 | x -> Option.value_exn (EquivTbl.min_elt eq_tbl x)) img
   in
   run ();
   (* get total count of labels *)
-  let max_label = ImgUtils.fold img ~init:0 ~f:Int.max in
-  let label_gap = 255 / max_label in
-  ImgUtils.map img ~f:(fun lbl -> lbl * label_gap)
+  let labels = ImgUtils.fold img ~init:Int.Set.empty
+      ~f:(fun x set -> if Int.Set.mem set x then set else Int.Set.add set x)
+  in
+  let labels = Int.Set.remove labels 0 in
+  Printf.printf "num of labels: %d\n" (Int.Set.length labels);
+
+  let delta = 255 / Int.Set.length labels in
+  let label_map = fst @@ Int.Set.fold labels
+      ~f:(fun (map, cnt) x -> Int.Map.add map ~key:x ~data:cnt, cnt + delta)
+      ~init:(Int.Map.empty, delta)
+  in
+  ImgUtils.map img ~f:(fun x -> if x = 0 then 0 else Int.Map.find_exn label_map x)
 
 (* argument parsing *)
 let command =
